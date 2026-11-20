@@ -14,7 +14,13 @@ namespace GeodesicAutomata
         public Material hexagonMaterial;
         public Material pentagonMaterial;
 
-        private readonly List<GameObject> _spawnedPanels = new List<GameObject>();
+        [SerializeField]
+        private List<GeodesicPanel> _panels = new List<GeodesicPanel>();
+
+        /// <summary>
+        /// 生成された全パネルの一覧（制御クラスなど外部からアクセス可能）
+        /// </summary>
+        public IReadOnlyList<GeodesicPanel> Panels => _panels;
 
         [ContextMenu("Build Geodesic Grid")]
         public void BuildGeodesicGrid()
@@ -27,6 +33,9 @@ namespace GeodesicAutomata
 
             Vector3[] faceCenters = CalculateFaceCenters(vertices, triangles, radius);
             List<List<int>> orderedFaceLoops = BuildDualFaceLoops(vertices, triangles, faceCenters);
+
+            // 各頂点（=各デュアルパネル）の隣接頂点リストを三角形のエッジから構築
+            List<int>[] neighborsPerVertex = BuildNeighborGraph(vertices.Length, triangles);
 
             for (int i = 0; i < orderedFaceLoops.Count; i++)
             {
@@ -46,31 +55,80 @@ namespace GeodesicAutomata
                 string panelName = isPentagon ? $"Pentagon_{i}" : $"Hexagon_{i}";
                 Material mat = isPentagon ? pentagonMaterial : hexagonMaterial;
 
-                CreatePanelObject(panelName, panelVerts, mat);
+                GeodesicPanel panel = CreatePanelObject(panelName, panelVerts, mat);
+
+                // Material.color ではなく GetColor を使って Material インスタンスの暗黙複製リークを防ぐ
+                Color initialColor = Color.white;
+                if (mat != null)
+                {
+                    if (mat.HasProperty("_BaseColor"))
+                    {
+                        initialColor = mat.GetColor("_BaseColor");
+                    }
+                    else if (mat.HasProperty("_Color"))
+                    {
+                        initialColor = mat.GetColor("_Color");
+                    }
+                }
+
+                panel.Initialize(i, isPentagon, neighborsPerVertex[i], initialColor);
+                _panels.Add(panel);
             }
+        }
+
+        private static List<int>[] BuildNeighborGraph(int vertexCount, int[] triangles)
+        {
+            HashSet<int>[] neighborSets = new HashSet<int>[vertexCount];
+            for (int i = 0; i < vertexCount; i++)
+            {
+                neighborSets[i] = new HashSet<int>();
+            }
+
+            for (int i = 0; i < triangles.Length; i += 3)
+            {
+                int a = triangles[i];
+                int b = triangles[i + 1];
+                int c = triangles[i + 2];
+
+                neighborSets[a].Add(b);
+                neighborSets[a].Add(c);
+                neighborSets[b].Add(a);
+                neighborSets[b].Add(c);
+                neighborSets[c].Add(a);
+                neighborSets[c].Add(b);
+            }
+
+            List<int>[] result = new List<int>[vertexCount];
+            for (int i = 0; i < vertexCount; i++)
+            {
+                result[i] = new List<int>(neighborSets[i]);
+            }
+
+            return result;
         }
 
         private void ClearChildren()
         {
-            for (int i = 0; i < _spawnedPanels.Count; i++)
-            {
-                if (_spawnedPanels[i] != null)
-                {
-                    if (Application.isPlaying)
-                    {
-                        Destroy(_spawnedPanels[i]);
-                    }
-                    else
-                    {
-                        DestroyImmediate(_spawnedPanels[i]);
-                    }
-                }
-            }
-            _spawnedPanels.Clear();
+            _panels.Clear();
 
             for (int i = transform.childCount - 1; i >= 0; i--)
             {
                 GameObject child = transform.GetChild(i).gameObject;
+
+                // 生成された Mesh アセットを明示的に Destroy し Native Memory のリークを防ぐ
+                MeshFilter mf = child.GetComponent<MeshFilter>();
+                if (mf != null && mf.sharedMesh != null)
+                {
+                    if (Application.isPlaying)
+                    {
+                        Destroy(mf.sharedMesh);
+                    }
+                    else
+                    {
+                        DestroyImmediate(mf.sharedMesh);
+                    }
+                }
+
                 if (Application.isPlaying)
                 {
                     Destroy(child);
@@ -309,14 +367,14 @@ namespace GeodesicAutomata
             return ordered;
         }
 
-        private void CreatePanelObject(string panelName, Vector3[] worldVertices, Material mat)
+        private GeodesicPanel CreatePanelObject(string panelName, Vector3[] worldVertices, Material mat)
         {
             GameObject panelObj = new GameObject(panelName);
             panelObj.transform.SetParent(transform, false);
-            _spawnedPanels.Add(panelObj);
 
             MeshFilter meshFilter = panelObj.AddComponent<MeshFilter>();
             MeshRenderer meshRenderer = panelObj.AddComponent<MeshRenderer>();
+            GeodesicPanel panelComp = panelObj.AddComponent<GeodesicPanel>();
 
             if (mat != null)
             {
@@ -367,6 +425,7 @@ namespace GeodesicAutomata
             mesh.RecalculateBounds();
 
             meshFilter.sharedMesh = mesh;
+            return panelComp;
         }
     }
 }
