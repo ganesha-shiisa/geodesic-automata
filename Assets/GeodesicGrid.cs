@@ -15,12 +15,32 @@ namespace GeodesicAutomata
         public Material pentagonMaterial;
 
         [SerializeField]
-        private List<GeodesicPanel> _panels = new List<GeodesicPanel>();
+        private GeodesicPanel[] _panels = new GeodesicPanel[0];
 
         /// <summary>
-        /// 生成された全パネルの一覧（制御クラスなど外部からアクセス可能）
+        /// 具体型配列で公開し、外部ループのインターフェース経由オーバーヘッドを回避
         /// </summary>
-        public IReadOnlyList<GeodesicPanel> Panels => _panels;
+        public GeodesicPanel[] Panels => _panels;
+
+        /// <summary>
+        /// シーン保存・Gitコミット用に、エディタ上で生成された全パネルメッシュと子オブジェクトを完全に消去します。
+        /// インスペクターのコンポーネント右クリックメニュー（または3点リーダー）から実行できます。
+        /// </summary>
+        [ContextMenu("Clear All Panels (For Git Commit / Clean Scene)")]
+        public void ClearAllPanelsForCommit()
+        {
+            ClearChildren();
+
+#if UNITY_EDITOR
+            // シーンに変更があったことをUnityに通知してCtrl+Sで保存できるようにマーク
+            if (!Application.isPlaying)
+            {
+                UnityEditor.EditorUtility.SetDirty(gameObject);
+                UnityEditor.SceneManagement.EditorSceneManager.MarkSceneDirty(gameObject.scene);
+                Debug.Log($"[GeodesicGrid] 全パネルとMeshを消去しました。Ctrl+Sでシーンを保存するとファイルサイズが最小化されます。");
+            }
+#endif
+        }
 
         [ContextMenu("Build Geodesic Grid")]
         public void BuildGeodesicGrid()
@@ -34,8 +54,10 @@ namespace GeodesicAutomata
             Vector3[] faceCenters = CalculateFaceCenters(vertices, triangles, radius);
             List<List<int>> orderedFaceLoops = BuildDualFaceLoops(vertices, triangles, faceCenters);
 
-            // 各頂点（=各デュアルパネル）の隣接頂点リストを三角形のエッジから構築
-            List<int>[] neighborsPerVertex = BuildNeighborGraph(vertices.Length, triangles);
+            // 各頂点（=各デュアルパネル）の隣接頂点配列を構築
+            int[][] neighborsPerVertex = BuildNeighborGraph(vertices.Length, triangles);
+
+            List<GeodesicPanel> panelList = new List<GeodesicPanel>(orderedFaceLoops.Count);
 
             for (int i = 0; i < orderedFaceLoops.Count; i++)
             {
@@ -57,7 +79,6 @@ namespace GeodesicAutomata
 
                 GeodesicPanel panel = CreatePanelObject(panelName, panelVerts, mat);
 
-                // Material.color ではなく GetColor を使って Material インスタンスの暗黙複製リークを防ぐ
                 Color initialColor = Color.white;
                 if (mat != null)
                 {
@@ -72,11 +93,13 @@ namespace GeodesicAutomata
                 }
 
                 panel.Initialize(i, isPentagon, neighborsPerVertex[i], initialColor);
-                _panels.Add(panel);
+                panelList.Add(panel);
             }
+
+            _panels = panelList.ToArray();
         }
 
-        private static List<int>[] BuildNeighborGraph(int vertexCount, int[] triangles)
+        private static int[][] BuildNeighborGraph(int vertexCount, int[] triangles)
         {
             HashSet<int>[] neighborSets = new HashSet<int>[vertexCount];
             for (int i = 0; i < vertexCount; i++)
@@ -98,10 +121,13 @@ namespace GeodesicAutomata
                 neighborSets[c].Add(b);
             }
 
-            List<int>[] result = new List<int>[vertexCount];
+            int[][] result = new int[vertexCount][];
             for (int i = 0; i < vertexCount; i++)
             {
-                result[i] = new List<int>(neighborSets[i]);
+                var set = neighborSets[i];
+                int[] arr = new int[set.Count];
+                set.CopyTo(arr);
+                result[i] = arr;
             }
 
             return result;
@@ -109,13 +135,12 @@ namespace GeodesicAutomata
 
         private void ClearChildren()
         {
-            _panels.Clear();
+            _panels = new GeodesicPanel[0];
 
             for (int i = transform.childCount - 1; i >= 0; i--)
             {
                 GameObject child = transform.GetChild(i).gameObject;
 
-                // 生成された Mesh アセットを明示的に Destroy し Native Memory のリークを防ぐ
                 MeshFilter mf = child.GetComponent<MeshFilter>();
                 if (mf != null && mf.sharedMesh != null)
                 {

@@ -1,11 +1,11 @@
-using System.Collections.Generic;
 using UnityEngine;
 
 namespace GeodesicAutomata
 {
     /// <summary>
     /// GeodesicGrid 上のパネル情報を取得・更新するコントローラー。
-    /// 配列の毎フレーム確保を排除し、GCアロケーションをゼロに抑えて動作します。
+    /// 配列のキャッシュ、具体型（int[]）の直接ループ、状態不変時の描画更新スキップ等により
+    /// UpdateScene / StdRender.ApplyShader の呼び出し回数とCPU負荷を最小化します。
     /// </summary>
     public class GeodesicAutomataController : MonoBehaviour
     {
@@ -14,11 +14,21 @@ namespace GeodesicAutomata
 
         [Header("Simulation Settings")]
         public float updateInterval = 0.5f;
-        public Color activeColor = Color.cyan;
-        public Color inactiveColor = Color.gray;
 
+        [Header("Color Map Settings")]
+        public ColorMapPreset colorPreset = ColorMapPreset.Viridis;
+        [Range(2, 64)]
+        public int totalStates = 7;
+
+        private ColorMap _colors;
+        private Color[] _cachedColorTable; // 配列インデックスで直引きして関数呼び出しをなくす
         private float _timer;
-        private int[] _nextStatesBuffer; // GCアロケーション回避用のバッファ
+        private bool _isStepAutomata = false;
+
+        // キャッシュ用配列
+        private GeodesicPanel[] _cachedPanels;
+        private int[][] _cachedNeighbors;
+        private int[] _nextStatesBuffer;
 
         private void Awake()
         {
@@ -30,93 +40,107 @@ namespace GeodesicAutomata
 
         private void Start()
         {
-            if (grid != null && (grid.Panels == null || grid.Panels.Count == 0))
+            if (grid != null && (grid.Panels == null || grid.Panels.Length == 0))
             {
                 grid.BuildGeodesicGrid();
             }
 
+            CacheGridReferences();
+            InitializeColorTable();
             InitializeAutomata();
+        }
+
+        private void CacheGridReferences()
+        {
+            if (grid == null || grid.Panels == null) return;
+
+            _cachedPanels = grid.Panels;
+            int count = _cachedPanels.Length;
+
+            _nextStatesBuffer = new int[count];
+            _cachedNeighbors = new int[count][];
+
+            // 各パネルの NeighborIds (int[]) 参照を配列化してローカルに保持（プロパティ経由を無くす）
+            for (int i = 0; i < count; i++)
+            {
+                _cachedNeighbors[i] = _cachedPanels[i].NeighborIds;
+            }
+        }
+
+        private void InitializeColorTable()
+        {
+            _colors = new ColorMap(totalStates, colorPreset);
+            _cachedColorTable = new Color[totalStates];
+            for (int i = 0; i < totalStates; i++)
+            {
+                _cachedColorTable[i] = _colors[i];
+            }
         }
 
         private void InitializeAutomata()
         {
-            if (grid == null || grid.Panels == null) return;
+            if (_cachedPanels == null || _cachedPanels.Length == 0) return;
 
-            int count = grid.Panels.Count;
-            _nextStatesBuffer = new int[count];
-
-            // ランダムに初期状態（0 または 1）を割り当て
-            foreach (var panel in grid.Panels)
+            int count = _cachedPanels.Length;
+            for (int i = 0; i < count; i++)
             {
-                panel.State = Random.value > 0.7f ? 1 : 0;
-                panel.SetColor(panel.State == 1 ? activeColor : inactiveColor);
+                GeodesicPanel panel = _cachedPanels[i];
+                panel.State = panel.NeighborIds.Length == 5 ? 1 : 0;
+                panel.SetColor(_cachedColorTable[panel.State]);
             }
         }
 
         private void Update()
         {
-            if (grid == null || grid.Panels == null || grid.Panels.Count == 0) return;
+            if (_cachedPanels == null || _cachedPanels.Length == 0) return;
 
             _timer += Time.deltaTime;
-            if (_timer >= updateInterval)
+            if (_timer >= updateInterval && !_isStepAutomata)
             {
+                _isStepAutomata = true;
                 _timer = 0f;
                 StepAutomata();
+                _isStepAutomata = false;
             }
         }
 
         /// <summary>
-        /// 1ステップのセル・オートマトン更新処理（毎回の new を無くしGCを発生させない）
+        /// 1ステップのセル・オートマトン更新処理（徹底したキャッシュとスキップ最適化）
         /// </summary>
         private void StepAutomata()
         {
-            var panels = grid.Panels;
-            int count = panels.Count;
+            GeodesicPanel[] panels = _cachedPanels;
+            int[][] allNeighbors = _cachedNeighbors;
+            int[] nextStates = _nextStatesBuffer;
+            Color[] colorTable = _cachedColorTable;
+            int count = panels.Length;
+            int mod = totalStates;
 
-            // バッファサイズが不足している場合のみリサイズ（通常は Start 時の1回のみ）
-            if (_nextStatesBuffer == null || _nextStatesBuffer.Length != count)
-            {
-                _nextStatesBuffer = new int[count];
-            }
-
-            // 1. 各パネルの周囲のパネルIDから現在の情報を取得し、次の状態を計算
+            // 1. 周囲のパネル情報から次の状態（State）を計算
             for (int i = 0; i < count; i++)
             {
-                GeodesicPanel panel = panels[i];
-                IReadOnlyList<int> neighborIds = panel.NeighborIds;
+                int[] neighbors = allNeighbors[i];
+                int neighborCount = neighbors.Length;
 
-                int activeNeighbors = 0;
-                int neighborCount = neighborIds.Count;
+                int sum = 0;
                 for (int j = 0; j < neighborCount; j++)
                 {
-                    int neighborId = neighborIds[j];
-                    if (neighborId >= 0 && neighborId < count)
-                    {
-                        if (panels[neighborId].State == 1)
-                        {
-                            activeNeighbors++;
-                        }
-                    }
+                    sum += panels[neighbors[j]].State;
                 }
-
-                // セル・オートマトン ルール
-                if (panel.State == 1)
-                {
-                    _nextStatesBuffer[i] = (activeNeighbors == 2 || activeNeighbors == 3) ? 1 : 0;
-                }
-                else
-                {
-                    _nextStatesBuffer[i] = (activeNeighbors == 2) ? 1 : 0;
-                }
+                nextStates[i] = sum % mod;
             }
 
-            // 2. 計算結果を各パネルへ指示して適用
+            // 2. 状態の適用と描画更新
             for (int i = 0; i < count; i++)
             {
                 GeodesicPanel panel = panels[i];
-                int nextState = _nextStatesBuffer[i];
-                panel.State = nextState;
-                panel.SetColor(nextState == 1 ? activeColor : inactiveColor);
+                int nextState = nextStates[i];
+
+                if (panel.State != nextState)
+                {
+                    panel.State = nextState;
+                    panel.SetColor(colorTable[nextState]);
+                }
             }
         }
     }
