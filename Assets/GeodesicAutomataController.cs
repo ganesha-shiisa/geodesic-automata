@@ -1,11 +1,12 @@
 using UnityEngine;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace GeodesicAutomata
 {
     /// <summary>
     /// GeodesicGrid 上のパネル情報を取得・更新するコントローラー。
-    /// 配列のキャッシュ、具体型（int[]）の直接ループ、状態不変時の描画更新スキップ等により
-    /// UpdateScene / StdRender.ApplyShader の呼び出し回数とCPU負荷を最小化します。
+    /// シンプルに grid.Panels から直接情報を取得し、ColorMap で色を設定します。
     /// </summary>
     public class GeodesicAutomataController : MonoBehaviour
     {
@@ -21,14 +22,19 @@ namespace GeodesicAutomata
         public int totalStates = 7;
 
         private ColorMap _colors;
-        private Color[] _cachedColorTable; // 配列インデックスで直引きして関数呼び出しをなくす
         private float _timer;
-        private bool _isStepAutomata = false;
 
-        // キャッシュ用配列
-        private GeodesicPanel[] _cachedPanels;
-        private int[][] _cachedNeighbors;
+        private int[] _currentStatesBuffer;
         private int[] _nextStatesBuffer;
+        private int[][] _neighborIdsCache;
+
+        private volatile bool _isCalculating;
+        private volatile bool _hasPendingResult;
+        private CancellationTokenSource _cts;
+
+        private Plane[] _frustumPlanes;
+        private Vector3 _cameraPos;
+        private Camera cam;
 
         private void Awake()
         {
@@ -36,6 +42,7 @@ namespace GeodesicAutomata
             {
                 grid = GetComponent<GeodesicGrid>();
             }
+            _cts = new CancellationTokenSource();
         }
 
         private void Start()
@@ -45,102 +52,202 @@ namespace GeodesicAutomata
                 grid.BuildGeodesicGrid();
             }
 
-            CacheGridReferences();
-            InitializeColorTable();
-            InitializeAutomata();
-        }
-
-        private void CacheGridReferences()
-        {
-            if (grid == null || grid.Panels == null) return;
-
-            _cachedPanels = grid.Panels;
-            int count = _cachedPanels.Length;
-
-            _nextStatesBuffer = new int[count];
-            _cachedNeighbors = new int[count][];
-
-            // 各パネルの NeighborIds (int[]) 参照を配列化してローカルに保持（プロパティ経由を無くす）
-            for (int i = 0; i < count; i++)
-            {
-                _cachedNeighbors[i] = _cachedPanels[i].NeighborIds;
-            }
-        }
-
-        private void InitializeColorTable()
-        {
+            // カラーパレットの生成
             _colors = new ColorMap(totalStates, colorPreset);
-            _cachedColorTable = new Color[totalStates];
-            for (int i = 0; i < totalStates; i++)
-            {
-                _cachedColorTable[i] = _colors[i];
-            }
+
+            cam = Camera.main;
+            InitializeAutomata();
+
         }
 
         private void InitializeAutomata()
         {
-            if (_cachedPanels == null || _cachedPanels.Length == 0) return;
+            if (grid == null || grid.Panels == null) return;
 
-            int count = _cachedPanels.Length;
+            var panels = grid.Panels;
+            int count = panels.Length;
+
+            EnsureBuffers(panels, count);
+
+            // 初期状態の設定（五角形なら1、六角形なら0）
             for (int i = 0; i < count; i++)
             {
-                GeodesicPanel panel = _cachedPanels[i];
-                panel.State = panel.NeighborIds.Length == 5 ? 1 : 0;
-                panel.SetColor(_cachedColorTable[panel.State]);
+                var panel = panels[i];
+                int initialState = panel.NeighborIds.Length == 5 ? 1 : 0;
+                panel.State = initialState;
+                _currentStatesBuffer[i] = initialState;
+                panel.SetColor(_colors[initialState]);
             }
         }
 
         private void Update()
         {
-            if (_cachedPanels == null || _cachedPanels.Length == 0) return;
+            UpdateCameraCullInfo();
 
-            _timer += Time.deltaTime;
-            if (_timer >= updateInterval && !_isStepAutomata)
+            if (grid == null || grid.Panels == null || grid.Panels.Length == 0) return;
+
+            // 別スレッドの計算が終わっていたらメインスレッドで描画反映
+            if (_hasPendingResult)
             {
-                _isStepAutomata = true;
+                _hasPendingResult = false;
+                ApplyRender();
+            }
+
+            // カメラ視界に入った「未反映（Dirty）カラー」のパネルを吐き出す
+            FlushVisibleDirtyPanels();
+
+            // インターバル経過＆計算中でなければ、次の計算を別スレッドへ投げる
+            _timer += Time.deltaTime;
+            if (_timer >= updateInterval && !_isCalculating)
+            {
                 _timer = 0f;
-                StepAutomata();
-                _isStepAutomata = false;
+                StartCalculateAsync();
+            }
+        }
+
+        private void UpdateCameraCullInfo()
+        {
+
+            if (cam == null) return;
+
+            if (_frustumPlanes == null)
+            {
+                _frustumPlanes = new Plane[6];
+            }
+
+            GeometryUtility.CalculateFrustumPlanes(cam, _frustumPlanes);
+            _cameraPos = cam.transform.position;
+        }
+
+        private void FlushVisibleDirtyPanels()
+        {
+            Camera cam = Camera.main;
+            if (cam == null) return;
+
+            if (_frustumPlanes == null)
+            {
+                _frustumPlanes = new Plane[6];
+            }
+
+            // カメラが動いていなければスキップするならここでも判定できるぜ
+            GeometryUtility.CalculateFrustumPlanes(cam, _frustumPlanes);
+
+            var panels = grid.Panels;
+            for (int i = 0; i < panels.Length; i++)
+            {
+                panels[i].FlushColorIfDirty(_frustumPlanes);
             }
         }
 
         /// <summary>
-        /// 1ステップのセル・オートマトン更新処理（徹底したキャッシュとスキップ最適化）
+        /// メインスレッドで現在の状態と隣接IDをコピーし、ワーカースレッドで次状態を計算する
         /// </summary>
-        private void StepAutomata()
+        private void StartCalculateAsync()
         {
-            GeodesicPanel[] panels = _cachedPanels;
-            int[][] allNeighbors = _cachedNeighbors;
-            int[] nextStates = _nextStatesBuffer;
-            Color[] colorTable = _cachedColorTable;
+            var panels = grid.Panels;
             int count = panels.Length;
             int mod = totalStates;
 
-            // 1. 周囲のパネル情報から次の状態（State）を計算
+            EnsureBuffers(panels, count);
+
+            // メインスレッド上で現在の State を純粋な配列へコピー
             for (int i = 0; i < count; i++)
             {
-                int[] neighbors = allNeighbors[i];
-                int neighborCount = neighbors.Length;
-
-                int sum = 0;
-                for (int j = 0; j < neighborCount; j++)
-                {
-                    sum += panels[neighbors[j]].State;
-                }
-                nextStates[i] = sum % mod;
+                _currentStatesBuffer[i] = panels[i].State;
             }
 
-            // 2. 状態の適用と描画更新
+            int[] currentStates = _currentStatesBuffer;
+            int[] nextStates = _nextStatesBuffer;
+            int[][] neighborIdsCache = _neighborIdsCache;
+            CancellationToken token = _cts.Token;
+
+            _isCalculating = true;
+
+            Task.Run(() =>
+            {
+                try
+                {
+                    if (token.IsCancellationRequested) return;
+
+                    // 別スレッド：周囲の State 合計から次の State を計算
+                    for (int i = 0; i < count; i++)
+                    {
+                        if (token.IsCancellationRequested) return;
+
+                        int[] neighborIds = neighborIdsCache[i];
+                        int sum = 0;
+                        for (int j = 0; j < neighborIds.Length; j++)
+                        {
+                            sum += currentStates[neighborIds[j]];
+                        }
+
+                        nextStates[i] = sum % mod;
+                    }
+
+                    _hasPendingResult = true;
+                }
+                finally
+                {
+                    _isCalculating = false;
+                }
+            }, token);
+        }
+
+        /// <summary>
+        /// 計算結果をパネルの State と色に反映する（メインスレッド実行）
+        /// </summary>
+        private void ApplyRender()
+        {
+            if (grid == null || grid.Panels == null || _colors == null) return;
+
+            var panels = grid.Panels;
+            int count = Mathf.Min(panels.Length, _nextStatesBuffer.Length);
+
             for (int i = 0; i < count; i++)
             {
+                int nextState = _nextStatesBuffer[i];
                 GeodesicPanel panel = panels[i];
-                int nextState = nextStates[i];
 
-                if (panel.State != nextState)
+                int prevState = panel.State;
+                if (prevState == nextState) continue;
+
+                panel.State = nextState;
+                panel.SetColor(_colors[nextState], _frustumPlanes);
+            }
+        }
+
+        private void EnsureBuffers(GeodesicPanel[] panels, int count)
+        {
+            if (_currentStatesBuffer == null || _currentStatesBuffer.Length != count)
+            {
+                _currentStatesBuffer = new int[count];
+            }
+
+            if (_nextStatesBuffer == null || _nextStatesBuffer.Length != count)
+            {
+                _nextStatesBuffer = new int[count];
+            }
+
+            if (_neighborIdsCache == null || _neighborIdsCache.Length != count)
+            {
+                _neighborIdsCache = new int[count][];
+                for (int i = 0; i < count; i++)
                 {
-                    panel.State = nextState;
-                    panel.SetColor(colorTable[nextState]);
+                    int[] src = panels[i].NeighborIds;
+                    int[] copy = new int[src.Length];
+                    System.Array.Copy(src, copy, src.Length);
+                    _neighborIdsCache[i] = copy;
                 }
+            }
+        }
+
+        private void OnDestroy()
+        {
+            if (_cts != null)
+            {
+                _cts.Cancel();
+                _cts.Dispose();
+                _cts = null;
             }
         }
     }

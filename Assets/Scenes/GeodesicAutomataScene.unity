@@ -149,7 +149,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: badd20b723cc49d4daa57d0a25d3955c, type: 3}
   m_Name: 
   m_EditorClassIdentifier: '::'
-  subdivisionLevels: 6
+  subdivisionLevels: 5
   radius: 100
   hexagonMaterial: {fileID: 2100000, guid: 9f5c8dc54a045b74c8ff78f9bf431703, type: 2}
   pentagonMaterial: {fileID: 2100000, guid: 9f5c8dc54a045b74c8ff78f9bf431703, type: 2}
