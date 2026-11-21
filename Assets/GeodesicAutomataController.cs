@@ -82,9 +82,9 @@ namespace GeodesicAutomata
 
         private void Update()
         {
-            UpdateCameraCullInfo();
-
             if (grid == null || grid.Panels == null || grid.Panels.Length == 0) return;
+
+            UpdateCameraCullInfo();
 
             // 別スレッドの計算が終わっていたらメインスレッドで描画反映
             if (_hasPendingResult)
@@ -98,10 +98,29 @@ namespace GeodesicAutomata
 
             // インターバル経過＆計算中でなければ、次の計算を別スレッドへ投げる
             _timer += Time.deltaTime;
+
             if (_timer >= updateInterval && !_isCalculating)
             {
                 _timer = 0f;
-                StartCalculateAsync();
+                var panels = grid.Panels;
+                int count = panels.Length;
+                int mod = totalStates;
+                int[] nextStates = _nextStatesBuffer;
+
+                for (int i = 0; i < count; i++)
+                {
+                    int[] neighborIds = panels[i].NeighborIds;
+                    int sum = 0;
+                    for (int j = 0; j < neighborIds.Length; j++)
+                    {
+                        sum += panels[neighborIds[j]].State;
+                    }
+
+                    nextStates[i] = (panels[i].State + sum) % mod;
+                }
+
+                _hasPendingResult = true;
+                _isCalculating = false;
             }
         }
 
