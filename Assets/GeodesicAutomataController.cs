@@ -1,6 +1,8 @@
 using UnityEngine;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Diagnostics;
+using System.Collections;
 
 namespace GeodesicAutomata
 {
@@ -30,6 +32,7 @@ namespace GeodesicAutomata
 
         private volatile bool _isCalculating;
         private volatile bool _hasPendingResult;
+        private volatile bool _isRendering;
         private CancellationTokenSource _cts;
 
         private Plane[] _frustumPlanes;
@@ -67,7 +70,9 @@ namespace GeodesicAutomata
             var panels = grid.Panels;
             int count = panels.Length;
 
-            EnsureBuffers(panels, count);
+            // EnsureBuffers(panels, count);
+            _currentStatesBuffer = new int[count];
+            _nextStatesBuffer = new int[count];
 
             // 初期状態の設定（五角形なら1、六角形なら0）
             for (int i = 0; i < count; i++)
@@ -86,11 +91,14 @@ namespace GeodesicAutomata
 
             UpdateCameraCullInfo();
 
+            if (_isRendering) return;
+
             // 別スレッドの計算が終わっていたらメインスレッドで描画反映
             if (_hasPendingResult)
             {
                 _hasPendingResult = false;
-                ApplyRender();
+                _isRendering = true;
+                StartCoroutine(ApplyRender());
             }
 
             // カメラ視界に入った「未反映（Dirty）カラー」のパネルを吐き出す
@@ -102,22 +110,8 @@ namespace GeodesicAutomata
             if (_timer >= updateInterval && !_isCalculating)
             {
                 _timer = 0f;
-                var panels = grid.Panels;
-                int count = panels.Length;
-                int mod = totalStates;
-                int[] nextStates = _nextStatesBuffer;
 
-                for (int i = 0; i < count; i++)
-                {
-                    int[] neighborIds = panels[i].NeighborIds;
-                    int sum = 0;
-                    for (int j = 0; j < neighborIds.Length; j++)
-                    {
-                        sum += panels[neighborIds[j]].State;
-                    }
-
-                    nextStates[i] = (panels[i].State + sum) % mod;
-                }
+                CalculateCellularAutomata();
 
                 _hasPendingResult = true;
                 _isCalculating = false;
@@ -158,70 +152,43 @@ namespace GeodesicAutomata
             }
         }
 
-        /// <summary>
-        /// メインスレッドで現在の状態と隣接IDをコピーし、ワーカースレッドで次状態を計算する
-        /// </summary>
-        private void StartCalculateAsync()
+        private void CalculateCellularAutomata()
         {
+
             var panels = grid.Panels;
             int count = panels.Length;
             int mod = totalStates;
+            int[] nextStates = _nextStatesBuffer;
 
-            EnsureBuffers(panels, count);
-
-            // メインスレッド上で現在の State を純粋な配列へコピー
             for (int i = 0; i < count; i++)
             {
-                _currentStatesBuffer[i] = panels[i].State;
+                int[] neighborIds = panels[i].NeighborIds;
+                int sum = 0;
+                for (int j = 0; j < neighborIds.Length; j++)
+                {
+                    sum += panels[neighborIds[j]].State;
+                }
+
+                nextStates[i] = (panels[i].State + sum) % mod;
             }
 
-            int[] currentStates = _currentStatesBuffer;
-            int[] nextStates = _nextStatesBuffer;
-            int[][] neighborIdsCache = _neighborIdsCache;
-            CancellationToken token = _cts.Token;
 
-            _isCalculating = true;
-
-            Task.Run(() =>
-            {
-                try
-                {
-                    if (token.IsCancellationRequested) return;
-
-                    // 別スレッド：周囲の State 合計から次の State を計算
-                    for (int i = 0; i < count; i++)
-                    {
-                        if (token.IsCancellationRequested) return;
-
-                        int[] neighborIds = neighborIdsCache[i];
-                        int sum = 0;
-                        for (int j = 0; j < neighborIds.Length; j++)
-                        {
-                            sum += currentStates[neighborIds[j]];
-                        }
-
-                        nextStates[i] = sum % mod;
-                    }
-
-                    _hasPendingResult = true;
-                }
-                finally
-                {
-                    _isCalculating = false;
-                }
-            }, token);
         }
 
         /// <summary>
         /// 計算結果をパネルの State と色に反映する（メインスレッド実行）
         /// </summary>
-        private void ApplyRender()
+        private IEnumerator ApplyRender()
         {
-            if (grid == null || grid.Panels == null || _colors == null) return;
+            float sliceStart = Time.realtimeSinceStartup;
+
+            // if (grid == null || grid.Panels == null || _colors == null) return;
 
             var panels = grid.Panels;
             int count = Mathf.Min(panels.Length, _nextStatesBuffer.Length);
 
+            int[] _visibleIndices = new int[panels.Length];
+            int _visibleCount = 0;
             for (int i = 0; i < count; i++)
             {
                 int nextState = _nextStatesBuffer[i];
@@ -232,42 +199,28 @@ namespace GeodesicAutomata
 
                 panel.State = nextState;
                 panel.SetColor(_colors[nextState], _frustumPlanes);
-            }
-        }
 
-        private void EnsureBuffers(GeodesicPanel[] panels, int count)
-        {
-            if (_currentStatesBuffer == null || _currentStatesBuffer.Length != count)
-            {
-                _currentStatesBuffer = new int[count];
-            }
-
-            if (_nextStatesBuffer == null || _nextStatesBuffer.Length != count)
-            {
-                _nextStatesBuffer = new int[count];
-            }
-
-            if (_neighborIdsCache == null || _neighborIdsCache.Length != count)
-            {
-                _neighborIdsCache = new int[count][];
-                for (int i = 0; i < count; i++)
+                if (panel.IsVisibleToCamera(_frustumPlanes))
                 {
-                    int[] src = panels[i].NeighborIds;
-                    int[] copy = new int[src.Length];
-                    System.Array.Copy(src, copy, src.Length);
-                    _neighborIdsCache[i] = copy;
+                    _visibleIndices[_visibleCount++] = i;
+                }
+
+                if (Time.realtimeSinceStartup - sliceStart >= 0.01)
+                {
+                    yield return null;
+                    sliceStart = Time.realtimeSinceStartup;
                 }
             }
-        }
 
-        private void OnDestroy()
-        {
-            if (_cts != null)
+            yield return null;
+
+            for (int idx = 0; idx < _visibleCount; idx++)
             {
-                _cts.Cancel();
-                _cts.Dispose();
-                _cts = null;
+                var panel = panels[_visibleIndices[idx]];
+                panel.ApplyColorToRenderer();
             }
+
+            _isRendering = false;
         }
     }
 }

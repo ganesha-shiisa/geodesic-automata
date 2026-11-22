@@ -67,11 +67,10 @@ namespace GeodesicAutomata
             _isColorInitialized = true;
             _isColorDirty = true;
             EnsureRenderer();
-
-            if (IsVisibleToCamera(frustumPlanes))
-            {
-                ApplyColorToRenderer();
-            }
+            // if (IsVisibleToCamera(frustumPlanes))
+            // {
+            //     ApplyColorToRenderer();
+            // }
         }
 
         public Color GetColor() => _currentColor;
@@ -101,14 +100,17 @@ namespace GeodesicAutomata
             return GeometryUtility.TestPlanesAABB(frustumPlanes, _renderer.bounds);
         }
 
-        private void ApplyColorToRenderer()
+        public void ApplyColorToRenderer()
         {
             EnsureRenderer();
             if (_renderer == null) return;
 
-            _renderer.GetPropertyBlock(_sharedPropBlock);
+            // _renderer.GetPropertyBlock(_sharedPropBlock);
+            // _sharedPropBlock.SetColor(BaseColorId, _currentColor);
+            // _sharedPropBlock.SetColor(ColorId, _currentColor);
+            // _renderer.SetPropertyBlock(_sharedPropBlock);
+            _sharedPropBlock.Clear();
             _sharedPropBlock.SetColor(BaseColorId, _currentColor);
-            _sharedPropBlock.SetColor(ColorId, _currentColor);
             _renderer.SetPropertyBlock(_sharedPropBlock);
 
             _isColorDirty = false;
