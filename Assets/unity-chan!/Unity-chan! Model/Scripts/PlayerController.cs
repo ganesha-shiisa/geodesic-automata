@@ -10,9 +10,13 @@ namespace UnityChan
         private Animator animator;
 
         private Vector2 _moveInput;
+        private bool _jumpPressed;
+
+        private bool isGrounded;
 
         private float moveSpeed = 1f;
         private float rotateSpeed = 10f;
+        private float _jumpCooldownTimer;
 
         void Awake()
         {
@@ -34,6 +38,12 @@ namespace UnityChan
             {
                 moveDirection.Normalize();
             }
+
+            if (_jumpCooldownTimer > 0f)
+            {
+                _jumpCooldownTimer -= Time.fixedDeltaTime;
+            }
+
 
             Move(moveDirection);
             Rotate(moveDirection);
@@ -73,7 +83,12 @@ namespace UnityChan
             bool isWalking =
                 direction.sqrMagnitude > 0.01f;
 
+            bool isJump = _jumpPressed;
+
             animator.SetBool("isWalking", isWalking);
+            animator.SetBool("isJump", isJump);
+            // animator.SetBool("isGrounded", isGrounded);
+            _jumpPressed = false;
         }
 
         public void OnMove(InputValue value)
@@ -81,5 +96,25 @@ namespace UnityChan
             _moveInput = value.Get<Vector2>();
         }
 
+        public void OnJump(InputValue value)
+        {
+            if (value.isPressed)
+            {
+                _jumpPressed = true;
+            }
+        }
+
+        // private void OnCollisionStay(Collision collision)
+        // {
+        //     // ジャンプ直後の数フレームは接地判定を戻さない
+        //     if (_jumpCooldownTimer > 0f) return;
+
+        //     isGrounded = true;
+        // }
+
+        // private void OnCollisionExit(Collision collision)
+        // {
+        //     isGrounded = false;
+        // }
     }
 }
