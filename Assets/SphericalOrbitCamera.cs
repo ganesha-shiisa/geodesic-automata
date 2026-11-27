@@ -93,10 +93,10 @@ namespace UnityChan
                 float keyX = 0f;
                 float keyY = 0f;
 
-                if (Keyboard.current.leftArrowKey.isPressed) keyX -= 1f;
-                if (Keyboard.current.rightArrowKey.isPressed) keyX += 1f;
-                if (Keyboard.current.upArrowKey.isPressed) keyY += 1f;
-                if (Keyboard.current.downArrowKey.isPressed) keyY -= 1f;
+                if (Keyboard.current.leftArrowKey.isPressed) keyX += 1f;
+                if (Keyboard.current.rightArrowKey.isPressed) keyX -= 1f;
+                if (Keyboard.current.upArrowKey.isPressed) keyY -= 1f;
+                if (Keyboard.current.downArrowKey.isPressed) keyY += 1f;
 
                 delta.x += keyX * keyOrbitSpeed * Time.deltaTime;
                 delta.y += keyY * keyOrbitSpeed * Time.deltaTime;
