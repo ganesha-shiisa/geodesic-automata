@@ -8544,7 +8544,6 @@ GameObject:
   - component: {fileID: 11400114}
   - component: {fileID: 11400116}
   - component: {fileID: 7022786601348140264}
-  - component: {fileID: 5101774303049835156}
   - component: {fileID: 1126680300136027411}
   - component: {fileID: 6219055693678824107}
   m_Layer: 0
@@ -8777,18 +8776,6 @@ MonoBehaviour:
   m_DefaultActionMap: 
   m_SplitScreenIndex: -1
   m_Camera: {fileID: 0}
---- !u!114 &5101774303049835156
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 100338}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: caa8ed94efc199d488b4e048f76fb1cd, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: Assembly-CSharp::UnityChan.PlayerController
 --- !u!54 &1126680300136027411
 Rigidbody:
   m_ObjectHideFlags: 0

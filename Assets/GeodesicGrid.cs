@@ -399,6 +399,7 @@ namespace GeodesicAutomata
 
             MeshFilter meshFilter = panelObj.AddComponent<MeshFilter>();
             MeshRenderer meshRenderer = panelObj.AddComponent<MeshRenderer>();
+            MeshCollider meshCollider = panelObj.AddComponent<MeshCollider>();
             GeodesicPanel panelComp = panelObj.AddComponent<GeodesicPanel>();
 
             if (mat != null)
@@ -450,6 +451,7 @@ namespace GeodesicAutomata
             mesh.RecalculateBounds();
 
             meshFilter.sharedMesh = mesh;
+            meshCollider.sharedMesh = mesh;
             return panelComp;
         }
     }
