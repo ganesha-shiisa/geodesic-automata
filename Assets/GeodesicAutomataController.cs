@@ -35,9 +35,16 @@ namespace GeodesicAutomata
         private volatile bool _isRendering;
         private CancellationTokenSource _cts;
 
-        private Plane[] _frustumPlanes;
+        private Plane[] _frustumPlanes = new Plane[6];
         private Vector3 _cameraPos;
         private Camera cam;
+
+        int[] _visibleIndices;
+        private int _visibleCount;
+
+        private Vector3 _lastCamPos;
+        private Quaternion _lastCamRot;
+        private bool _hasLastCamState;
 
         private void Awake()
         {
@@ -60,7 +67,6 @@ namespace GeodesicAutomata
 
             cam = Camera.main;
             InitializeAutomata();
-
         }
 
         private void InitializeAutomata()
@@ -83,17 +89,17 @@ namespace GeodesicAutomata
                 _currentStatesBuffer[i] = initialState;
                 panel.SetColor(_colors[initialState]);
             }
+            _visibleIndices = new int[panels.Length];
         }
 
         private void Update()
         {
-            if (grid == null || grid.Panels == null || grid.Panels.Length == 0) return;
 
-            UpdateCameraCullInfo();
+            if (grid == null || grid.Panels == null || grid.Panels.Length == 0) return;
 
             if (_isRendering) return;
 
-            // 別スレッドの計算が終わっていたらメインスレッドで描画反映
+            // // 別スレッドの計算が終わっていたらメインスレッドで描画反映
             if (_hasPendingResult)
             {
                 _hasPendingResult = false;
@@ -101,12 +107,7 @@ namespace GeodesicAutomata
                 StartCoroutine(ApplyRender());
             }
 
-            // カメラ視界に入った「未反映（Dirty）カラー」のパネルを吐き出す
-            FlushVisibleDirtyPanels();
-
-            // インターバル経過＆計算中でなければ、次の計算を別スレッドへ投げる
             _timer += Time.deltaTime;
-
             if (_timer >= updateInterval && !_isCalculating)
             {
                 _timer = 0f;
@@ -118,37 +119,65 @@ namespace GeodesicAutomata
             }
         }
 
-        private void UpdateCameraCullInfo()
+        private void LateUpdate()
         {
-
+            cam ??= Camera.main;
             if (cam == null) return;
 
-            if (_frustumPlanes == null)
+            UpdateCameraCullInfo();
+
+            if (IsCameraChanged())
             {
-                _frustumPlanes = new Plane[6];
+                FlushVisibleDirtyPanels(cam);
             }
+        }
+
+        private void UpdateCameraCullInfo()
+        {
+            if (cam == null) return;
 
             GeometryUtility.CalculateFrustumPlanes(cam, _frustumPlanes);
             _cameraPos = cam.transform.position;
         }
 
-        private void FlushVisibleDirtyPanels()
+        private bool IsCameraChanged()
         {
-            Camera cam = Camera.main;
-            if (cam == null) return;
+            Transform t = cam.transform;
+            Vector3 pos = t.position;
+            Quaternion rot = t.rotation;
 
-            if (_frustumPlanes == null)
+            if (!_hasLastCamState)
             {
-                _frustumPlanes = new Plane[6];
+                _lastCamPos = pos;
+                _lastCamRot = rot;
+                _hasLastCamState = true;
+                return true;
             }
 
-            // カメラが動いていなければスキップするならここでも判定できるぜ
+            bool posSame = (_lastCamPos - pos).sqrMagnitude <= 1e-8f;
+            bool rotSame = Quaternion.Angle(_lastCamRot, rot) <= 0.001f;
+
+            if (posSame && rotSame)
+            {
+                return false;
+            }
+
+            _lastCamPos = pos;
+            _lastCamRot = rot;
+            _cameraPos = pos;
+            return true;
+        }
+
+        private void FlushVisibleDirtyPanels(Camera cam)
+        {
+            if (cam == null) return;
+
             GeometryUtility.CalculateFrustumPlanes(cam, _frustumPlanes);
 
             var panels = grid.Panels;
             for (int i = 0; i < panels.Length; i++)
             {
-                panels[i].FlushColorIfDirty(_frustumPlanes);
+                panels[i].FlushColorIfDirty(_frustumPlanes, _cameraPos);
             }
         }
 
@@ -180,32 +209,32 @@ namespace GeodesicAutomata
         /// </summary>
         private IEnumerator ApplyRender()
         {
-            float sliceStart = Time.realtimeSinceStartup;
+            if (grid == null || grid.Panels == null || _colors == null) yield break;
 
-            // if (grid == null || grid.Panels == null || _colors == null) return;
+            float sliceStart = Time.realtimeSinceStartup;
 
             var panels = grid.Panels;
             int count = Mathf.Min(panels.Length, _nextStatesBuffer.Length);
+            _visibleCount = 0;
 
-            int[] _visibleIndices = new int[panels.Length];
-            int _visibleCount = 0;
             for (int i = 0; i < count; i++)
             {
                 int nextState = _nextStatesBuffer[i];
                 GeodesicPanel panel = panels[i];
 
-                int prevState = panel.State;
-                if (prevState == nextState) continue;
-
-                panel.State = nextState;
-                panel.SetColor(_colors[nextState], _frustumPlanes);
-
-                if (panel.IsVisibleToCamera(_frustumPlanes))
+                bool visible = panel.IsVisibleToCamera(_frustumPlanes, _cameraPos);
+                if (visible)
                 {
                     _visibleIndices[_visibleCount++] = i;
                 }
 
-                if (Time.realtimeSinceStartup - sliceStart >= 0.01)
+                int prevState = panel.State;
+                if (prevState == nextState) continue;
+
+                panel.State = nextState;
+                panel.SetColor(_colors[nextState]);
+
+                if (Time.realtimeSinceStartup - sliceStart >= 0.005)
                 {
                     yield return null;
                     sliceStart = Time.realtimeSinceStartup;

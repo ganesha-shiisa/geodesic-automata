@@ -13,7 +13,7 @@ namespace GeodesicAutomata
         int State { get; set; }
         float CustomValue { get; set; }
 
-        void SetColor(Color color, Plane[] frustumPlanes = null);
+        void SetColor(Color color);
         Color GetColor();
 
     }
@@ -31,7 +31,6 @@ namespace GeodesicAutomata
         private static readonly int ColorId = Shader.PropertyToID("_Color");         // Built-in
 
         private Color _currentColor = new Color(-1f, -1f, -1f, -1f);
-        private bool _isColorInitialized = false;
         private bool _isColorDirty = false;
 
         public int Id => _id;
@@ -56,21 +55,10 @@ namespace GeodesicAutomata
             SetColor(initialColor);
         }
 
-        public void SetColor(Color color, Plane[] frustumPlanes = null)
+        public void SetColor(Color color)
         {
-            if (_isColorInitialized && _currentColor == color)
-            {
-                return;
-            }
-
             _currentColor = color;
-            _isColorInitialized = true;
             _isColorDirty = true;
-            EnsureRenderer();
-            // if (IsVisibleToCamera(frustumPlanes))
-            // {
-            //     ApplyColorToRenderer();
-            // }
         }
 
         public Color GetColor() => _currentColor;
@@ -81,23 +69,47 @@ namespace GeodesicAutomata
             _sharedPropBlock ??= new MaterialPropertyBlock();
         }
 
-        public void FlushColorIfDirty(Plane[] frustumPlanes)
+        public void FlushColorIfDirty(Plane[] frustumPlanes, Vector3 cameraPos)
         {
-            if (_isColorDirty && IsVisibleToCamera(frustumPlanes))
+            if (_isColorDirty && IsVisibleToCamera(frustumPlanes, cameraPos))
             {
+                SetRendererEnabled(true);
                 ApplyColorToRenderer();
             }
         }
 
-        public bool IsVisibleToCamera(Plane[] frustumPlanes)
+        public bool IsVisibleToCamera(Plane[] frustumPlanes, Vector3 cameraPos, Vector3 sphereCenter = default)
         {
             if (frustumPlanes == null) return true;
 
             EnsureRenderer();
             if (_renderer == null) return false;
 
-            // Renderer の Bounds がカメラの視錐台（6枚の平面）と交差・内包しているか判定
-            return GeometryUtility.TestPlanesAABB(frustumPlanes, _renderer.bounds);
+            Vector3 center = _renderer.bounds.center;
+
+            // 裏向き判定（球体の外向き法線と、パネル→カメラの向きの内積）
+            Vector3 outwardNormal = (center - sphereCenter).normalized;
+            Vector3 toCamera = cameraPos - center;
+            if (Vector3.Dot(outwardNormal, toCamera) <= -0.3f)
+            {
+                return false;
+            }
+
+            // 視錐台判定
+            Bounds bounds = _renderer.bounds;
+            bounds.Expand(Vector3.one * (1.0f * 2f));
+            return GeometryUtility.TestPlanesAABB(frustumPlanes, bounds);
+        }
+
+        public void SetRendererEnabled(bool enabled)
+        {
+            EnsureRenderer();
+            if (_renderer == null) return;
+
+            if (_renderer.enabled != enabled)
+            {
+                _renderer.enabled = enabled;
+            }
         }
 
         public void ApplyColorToRenderer()
@@ -105,10 +117,6 @@ namespace GeodesicAutomata
             EnsureRenderer();
             if (_renderer == null) return;
 
-            // _renderer.GetPropertyBlock(_sharedPropBlock);
-            // _sharedPropBlock.SetColor(BaseColorId, _currentColor);
-            // _sharedPropBlock.SetColor(ColorId, _currentColor);
-            // _renderer.SetPropertyBlock(_sharedPropBlock);
             _sharedPropBlock.Clear();
             _sharedPropBlock.SetColor(BaseColorId, _currentColor);
             _renderer.SetPropertyBlock(_sharedPropBlock);
